@@ -36,7 +36,7 @@ try {
     if ($manifestCommit -ne $sourceCommit) { throw 'Asset manifest does not match the committed source.' }
 
     # Fork preserves upstream history and attribution. Never overwrite an unrelated repository.
-    & $GhPath repo fork imoonkey/closepaw --clone=false --remote=false --default-branch-only
+    & $GhPath repo fork imoonkey/closepaw --clone=false --default-branch-only
     if ($LASTEXITCODE -ne 0) { throw 'Could not create or locate the user fork.' }
     $repositoryJson = & $GhPath api "repos/$repository"
     if ($LASTEXITCODE -ne 0) { throw 'Could not verify fork metadata.' }
