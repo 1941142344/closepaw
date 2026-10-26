@@ -76,13 +76,14 @@ class ModelCatalog private constructor(private val entries: Map<String, ModelEnt
      * @throws IllegalArgumentException if the name is not in the catalog.
      */
     fun resolve(name: String): ModelEntry =
-            entries[name]
+            resolveOrNull(name)
                     ?: throw IllegalArgumentException(
                             "Unknown model '$name'. Available: ${entries.keys.sorted()}"
                     )
 
     /** Resolve a model by name, returning null if not found. */
-    fun resolveOrNull(name: String): ModelEntry? = entries[name]
+    fun resolveOrNull(name: String): ModelEntry? =
+            entries[CodexModels.migrateSavedModel(name)] ?: entries[name]
 
     /** All entries, in insertion order. */
     fun all(): List<ModelEntry> = entries.values.toList()
@@ -95,7 +96,7 @@ class ModelCatalog private constructor(private val entries: Map<String, ModelEnt
         get() = entries.size
 
     /** Check if a model name exists. */
-    operator fun contains(name: String): Boolean = name in entries
+    operator fun contains(name: String): Boolean = resolveOrNull(name) != null
 
     /** Models for a given provider, optionally filtered by API type. */
     fun modelsFor(provider: LLMProvider, api: ApiType? = null): List<ModelEntry> =

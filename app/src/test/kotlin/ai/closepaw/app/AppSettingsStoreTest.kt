@@ -16,6 +16,22 @@ import org.junit.Before
 import org.junit.Test
 
 class AppSettingsStoreTest {
+
+    @Test
+    fun `retired subscription models migrate on load and persist`() {
+        for (old in listOf("gpt-5.2-codex", "gpt-5.4-codex", "gpt-5.5-codex")) {
+            backing["model"] = old
+            assertThat(AppSettingsStore(context).load().selectedModel).isEqualTo("gpt-6.1-sol-codex")
+            assertThat(backing["model"]).isEqualTo("gpt-6.1-sol-codex")
+        }
+    }
+
+    @Test
+    fun `new installation prefers subscription model while explicit other providers stay selected`() {
+        assertThat(AppSettingsStore(context).load().selectedModel).isEqualTo("gpt-6.1-sol-codex")
+        backing["model"] = "glm-5"
+        assertThat(AppSettingsStore(context).load().selectedModel).isEqualTo("glm-5")
+    }
     private lateinit var backing: MutableMap<String, Any?>
     private lateinit var context: Context
 

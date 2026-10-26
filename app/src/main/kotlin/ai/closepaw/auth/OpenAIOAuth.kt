@@ -84,7 +84,7 @@ class OAuthCallbackServer(private val expectedState: String) {
     /** Start listening. Call from IO dispatcher. */
     fun start(): Boolean {
         return try {
-            serverSocket = ServerSocket(OAuthConfig.CALLBACK_PORT).apply {
+            serverSocket = ServerSocket(OAuthConfig.CALLBACK_PORT, 1, java.net.InetAddress.getByName("127.0.0.1")).apply {
                 soTimeout = 120_000 // 2 min timeout
             }
             Log.d(TAG, "Listening on localhost:${OAuthConfig.CALLBACK_PORT}")
@@ -110,7 +110,8 @@ class OAuthCallbackServer(private val expectedState: String) {
             val queryStart = path.indexOf('?')
             val params = if (queryStart >= 0) {
                 path.substring(queryStart + 1).split("&").associate {
-                    val (k, v) = it.split("=", limit = 2)
+                    val k = it.substringBefore("=")
+                    val v = it.substringAfter("=", "")
                     java.net.URLDecoder.decode(k, "UTF-8") to java.net.URLDecoder.decode(v, "UTF-8")
                 }
             } else emptyMap()
@@ -184,124 +185,56 @@ object OAuthTokenExchange {
         data class Error(val message: String) : Result
     }
 
-    /** Exchange authorization code for tokens, then exchange id_token for API key. */
-    suspend fun exchange(code: String, verifier: String): Result = withContext(Dispatchers.IO) {
+    /** Keep the subscription OAuth access token; never exchange it for an API key. */
+    suspend fun exchange(
+        code: String,
+        verifier: String,
+        requestToken: (String) -> Result = ::postTokenRequest,
+    ): Result = withContext(Dispatchers.IO) {
         try {
             val body = listOf(
                 "grant_type" to "authorization_code",
                 "client_id" to OAuthConfig.CLIENT_ID,
                 "code" to code,
                 "code_verifier" to verifier,
-                "redirect_uri" to OAuthConfig.REDIRECT_URI
+                "redirect_uri" to OAuthConfig.REDIRECT_URI,
             ).toFormBody()
-            val tokenResult = withDnsRetry { postTokenRequest(body) }
-            if (tokenResult !is Result.Success) return@withContext tokenResult
-
-            // Extract id_token from the initial response for token exchange
-            val idToken = tokenResult.tokens.idToken
-            if (BuildConfig.DEBUG) {
-                Log.d(TAG, "id_token present: ${idToken != null}, length: ${idToken?.length ?: 0}")
-            }
-            if (idToken == null) {
-                Log.w(TAG, "No id_token in OAuth response, using access_token directly")
-                return@withContext tokenResult
-            }
-
-            // Token exchange: id_token → openai-api-key
-            val apiKeyResult = withDnsRetry { exchangeForApiKey(idToken) }
-            if (apiKeyResult is Result.Success) {
-                // Use the exchanged API key as access token, keep original refresh token
-                Result.Success(
-                    OAuthTokens(
-                        accessToken = apiKeyResult.tokens.accessToken,
-                        refreshToken = tokenResult.tokens.refreshToken,
-                        expiresAt = tokenResult.tokens.expiresAt,
-                        email = tokenResult.tokens.email,
-                        idToken = idToken
-                    )
-                )
-            } else {
-                Log.w(TAG, "Token exchange failed, falling back to access_token")
-                tokenResult
-            }
+            withDnsRetry { requestToken(body) }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Token exchange failed", e)
-            Result.Error("Sign-in failed: ${e.message}")
+            // Never log the code, request body, or tokens.
+            Result.Error("Sign-in token request failed. Please try again.")
         }
     }
 
-    /** Exchange id_token for an API-key-style token (same as Codex CLI). */
-    private fun exchangeForApiKey(idToken: String): Result {
-        val body = listOf(
-            "grant_type" to "urn:ietf:params:oauth:grant-type:token-exchange",
-            "client_id" to OAuthConfig.CLIENT_ID,
-            "requested_token" to "openai-api-key",
-            "subject_token" to idToken,
-            "subject_token_type" to "urn:ietf:params:oauth:token-type:id_token"
-        ).toFormBody()
-
-        val conn = (URL(OAuthConfig.TOKEN_URL).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
-            connectTimeout = 10_000
-            readTimeout = 20_000
-            doOutput = true
-        }
-        try {
-            conn.outputStream.use { it.write(body.toByteArray()) }
-            val code = conn.responseCode
-            if (code != 200) {
-                val errorBody = conn.errorStream?.bufferedReader()?.readText() ?: ""
-                Log.e(TAG, "API key exchange failed: HTTP $code (${errorBody.length} chars)")
-                return Result.Error("API key exchange failed: HTTP $code")
-            }
-            val json = JSONObject(conn.inputStream.bufferedReader().readText())
-            val accessToken = json.getString("access_token")
-            Log.d(TAG, "Token exchange successful — got API key")
-            return Result.Success(
-                OAuthTokens(accessToken = accessToken, refreshToken = "", expiresAt = 0, email = null)
-            )
-        } finally {
-            conn.disconnect()
-        }
-    }
-
-    /** Refresh access token. */
-    suspend fun refresh(refreshToken: String): Result = withContext(Dispatchers.IO) {
+    /** Refresh subscription tokens. A refresh response need not rotate every field. */
+    suspend fun refresh(
+        refreshToken: String,
+        requestToken: (String) -> Result = ::postTokenRequest,
+    ): Result = withContext(Dispatchers.IO) {
         try {
             val body = listOf(
                 "grant_type" to "refresh_token",
                 "refresh_token" to refreshToken,
-                "client_id" to OAuthConfig.CLIENT_ID
+                "client_id" to OAuthConfig.CLIENT_ID,
             ).toFormBody()
-            val tokenResult = withDnsRetry { postTokenRequest(body) }
-            if (tokenResult !is Result.Success) return@withContext tokenResult
-
-            // Re-exchange id_token for fresh API key
-            val idToken = tokenResult.tokens.idToken
-            if (idToken != null) {
-                val apiKeyResult = withDnsRetry { exchangeForApiKey(idToken) }
-                if (apiKeyResult is Result.Success) {
-                    return@withContext Result.Success(
-                        OAuthTokens(
-                            accessToken = apiKeyResult.tokens.accessToken,
-                            refreshToken = tokenResult.tokens.refreshToken,
-                            expiresAt = tokenResult.tokens.expiresAt,
-                            email = tokenResult.tokens.email,
-                            idToken = idToken
-                        )
-                    )
-                }
+            when (val result = withDnsRetry { requestToken(body) }) {
+                is Result.Success -> Result.Success(result.tokens.copy(
+                    refreshToken = result.tokens.refreshToken.ifBlank { refreshToken },
+                ))
+                is Result.Error -> result
             }
-            tokenResult
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Token refresh failed", e)
-            Result.Error("Token refresh failed: ${e.message}")
+            Result.Error("Token refresh failed. Please sign in with ChatGPT again.")
         }
     }
 
     private fun postTokenRequest(body: String): Result {
         val conn = (URL(OAuthConfig.TOKEN_URL).openConnection() as HttpURLConnection).apply {
+            instanceFollowRedirects = false
             requestMethod = "POST"
             setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
             connectTimeout = 10_000
@@ -321,7 +254,7 @@ object OAuthTokenExchange {
             val refreshToken = json.optString("refresh_token", "")
             val expiresIn = json.optLong("expires_in", 3600)
             val idToken = json.optString("id_token", "").ifEmpty { null }
-            val email = parseEmailFromJwt(accessToken)
+            val email = idToken?.let(::parseEmailFromJwt) ?: parseEmailFromJwt(accessToken)
             return Result.Success(
                 OAuthTokens(
                     accessToken = accessToken,
@@ -365,6 +298,7 @@ fun parseEmailFromJwt(jwt: String): String? {
         val payload = String(base64UrlDecode(parts[1]), Charsets.UTF_8)
         val json = JSONObject(payload)
         json.optString("https://api.openai.com/profile.email", "").ifEmpty { null }
+            ?: json.optJSONObject("https://api.openai.com/profile")?.optString("email", "")?.ifEmpty { null }
             ?: json.optString("email", "").ifEmpty { null }
     } catch (e: Exception) {
         null
@@ -381,13 +315,9 @@ private fun base64UrlDecode(s: String): ByteArray {
 }
 
 /**
- * Validate OAuth access token by making a minimal call to ChatGPT backend-api.
- * This is the same endpoint OpenClaw uses (chatgpt.com/backend-api/codex/responses).
+ * Validate subscription access through the Codex model catalog without inference.
  */
 object OAuthCodexValidator {
-    private const val TAG = "OAuthCodexValidator"
-    private const val CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
-
     sealed interface Result {
         data object Valid : Result
         data class Invalid(val message: String) : Result
@@ -407,70 +337,40 @@ object OAuthCodexValidator {
         }
     }
 
-    /** Validate by sending a minimal request to ChatGPT backend. */
+    /** Validate auth without generating tokens or depending on one model's availability. */
     suspend fun validate(accessToken: String): Result = withContext(Dispatchers.IO) {
         val accountId = extractAccountId(accessToken)
-        if (accountId == null) {
-            return@withContext Result.Invalid("Could not extract account ID from token.")
-        }
-        Log.d(TAG, "Validating token against Codex backend, accountId=$accountId")
-
+            ?: return@withContext Result.Invalid("Please sign in with ChatGPT again.")
+        var conn: HttpURLConnection? = null
         try {
-            val inputItem = JSONObject().apply {
-                put("role", "user")
-                put("content", org.json.JSONArray().apply {
-                    put(JSONObject().apply {
-                        put("type", "input_text")
-                        put("text", "Reply with OK")
-                    })
-                })
-            }
-            val body = JSONObject().apply {
-                put("model", "gpt-5.4")
-                put("stream", true)
-                put("store", false)
-                put("instructions", "Reply with OK")
-                put("input", org.json.JSONArray().apply { put(inputItem) })
-            }
-
-            val conn = (URL(CODEX_URL).openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("Accept", "text/event-stream")
+            conn = (URL("https://chatgpt.com/backend-api/codex/models?client_version=0.156.1")
+                .openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                instanceFollowRedirects = false
+                setRequestProperty("Accept", "application/json")
                 setRequestProperty("Authorization", "Bearer $accessToken")
                 setRequestProperty("chatgpt-account-id", accountId)
-                setRequestProperty("OpenAI-Beta", "responses=experimental")
-                setRequestProperty("originator", "pi")
                 connectTimeout = 10_000
                 readTimeout = 30_000
-                doOutput = true
             }
-
-            conn.outputStream.use { it.write(body.toString().toByteArray()) }
-            val code = conn.responseCode
-            Log.d(TAG, "Codex validation response: HTTP $code")
-
-            when {
-                code in 200..299 -> {
-                    // SSE stream started — token is valid. Close immediately.
-                    try { conn.inputStream.close() } catch (_: Exception) {}
-                    Log.d(TAG, "Codex token validated successfully")
-                    Result.Valid
+            when (val status = conn.responseCode) {
+                in 200..299 -> {
+                    val models = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
+                        .optJSONArray("models")
+                    if (models != null && models.length() > 0) Result.Valid
+                    else Result.Invalid("No Codex models returned for this ChatGPT account.")
                 }
-                code == 401 || code == 403 -> {
-                    val errorBody = conn.errorStream?.bufferedReader()?.readText() ?: ""
-                    Log.e(TAG, "Codex validation failed: HTTP $code (${errorBody.length} chars)")
-                    Result.Invalid("Token rejected by ChatGPT. Check your subscription.")
-                }
-                else -> {
-                    val errorBody = conn.errorStream?.bufferedReader()?.readText() ?: ""
-                    Log.e(TAG, "Codex validation error: HTTP $code (${errorBody.length} chars)")
-                    Result.Invalid("ChatGPT returned HTTP $code")
-                }
+                401 -> Result.Invalid("Session expired. Please sign in with ChatGPT again.")
+                403 -> Result.Invalid("Codex access is not available for this ChatGPT account or workspace.")
+                429 -> Result.Invalid("ChatGPT usage limit reached. Try again later.")
+                else -> Result.Invalid("ChatGPT returned HTTP $status. Try again later.")
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
-            Log.e(TAG, "Codex validation failed", e)
-            Result.Invalid("Connection failed: ${e.message}")
+            Result.Invalid("Could not connect to ChatGPT. Please try again.")
+        } finally {
+            conn?.disconnect()
         }
     }
 }

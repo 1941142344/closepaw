@@ -291,6 +291,12 @@ class ModelCatalogRepository(
         private const val FALLBACK_CATALOG_JSON =
             """
             {
+              "gpt-6.1-sol-codex": {
+                "display_name": "GPT-6.1 Sol (ChatGPT sign-in)",
+                "provider": "OPENAI_CODEX",
+                "api": "response",
+                "model_id": "gpt-6.1-sol"
+              },
               "glm-5": {
                 "display_name": "GLM-5",
                 "provider": "OPENROUTER",

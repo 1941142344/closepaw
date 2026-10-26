@@ -23,6 +23,41 @@ import org.junit.Test
  */
 class AuthStoreTest {
 
+    @Test
+    fun `refresh preserves identity and refresh token omitted by server`() = runBlocking {
+        val original = AuthCredential.OAuth("old", "refresh", 0L, "user@example.com", "identity")
+        val store = newStore(now = { 1000L }, refresher = {
+            assertThat(it).isEqualTo("refresh")
+            AuthCredential.OAuth("fresh", "", Long.MAX_VALUE, null, null)
+        })
+        store.set(LLMProvider.OPENAI_CODEX, original)
+        assertThat(store.codexHeaders(LLMProvider.OPENAI_CODEX).accessToken).isEqualTo("fresh")
+        assertThat(store.get(LLMProvider.OPENAI_CODEX)).isEqualTo(
+            original.copy(accessToken = "fresh", expiresAt = Long.MAX_VALUE)
+        )
+    }
+
+    @Test
+    fun `old exchanged key is replaced using OAuth refresh even before expiry`() = runBlocking {
+        var calls = 0
+        val store = newStore(refresher = {
+            calls++
+            AuthCredential.OAuth("subscription-access", "refresh", Long.MAX_VALUE, null, null)
+        })
+        store.set(LLMProvider.OPENAI_CODEX, AuthCredential.OAuth("sk-fake-old-key", "refresh", Long.MAX_VALUE, null, null))
+        assertThat(store.codexHeaders(LLMProvider.OPENAI_CODEX).accessToken).isEqualTo("subscription-access")
+        assertThat(calls).isEqualTo(1)
+    }
+
+    @Test
+    fun `account header can come from access token without id token`() = runBlocking {
+        val payload = """{"https://api.openai.com/auth":{"chatgpt_account_id":"fake-account"}}"""
+        val jwt = "header." + java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(payload.toByteArray()) + ".sig"
+        val store = newStore()
+        store.set(LLMProvider.OPENAI_CODEX, AuthCredential.OAuth(jwt, "refresh", Long.MAX_VALUE, null, null))
+        assertThat(store.codexHeaders(LLMProvider.OPENAI_CODEX).chatgptAccountId).isEqualTo("fake-account")
+    }
+
     private lateinit var context: Context
     private lateinit var fakePrefs: FakeSharedPreferences
 

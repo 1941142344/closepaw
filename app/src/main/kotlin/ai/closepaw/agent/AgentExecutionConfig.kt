@@ -65,7 +65,7 @@ data class AgentExecutionConfig(
      * Model name (key in llm_models.json) for this agent's LLM calls.
      * Set by SessionAgentRunner based on agent role.
      */
-    val modelName: String = "gpt-5.2",
+    val modelName: String = ai.closepaw.llm.CodexModels.DEFAULT_MODEL_KEY,
 
     /**
      * Eval-only safety net. When non-null, the agent loop stops with

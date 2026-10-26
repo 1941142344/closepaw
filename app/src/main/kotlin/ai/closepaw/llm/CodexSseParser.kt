@@ -1,6 +1,5 @@
 package ai.closepaw.llm
 
-import android.util.Log
 import java.io.BufferedReader
 import java.io.InputStream
 import org.json.JSONObject
@@ -10,8 +9,6 @@ import org.json.JSONObject
  * and maps Codex-specific event types to [LLMStreamEvent].
  */
 object CodexSseParser {
-
-    private const val TAG = "CodexSseParser"
 
     data class SseEvent(val type: String, val json: JSONObject)
 
@@ -40,7 +37,7 @@ object CodexSseParser {
                         val type = json.optString("type", "")
                         if (type.isNotEmpty()) yield(SseEvent(type, json))
                     } catch (e: Exception) {
-                        Log.w(TAG, "Failed to parse SSE data: ${data.take(200)}", e)
+                        throw IllegalStateException("Invalid Codex stream event; response was not completed")
                     }
                 }
                 // Ignore "event:", "id:", "retry:" and other non-data lines
@@ -55,7 +52,7 @@ object CodexSseParser {
                 val type = json.optString("type", "")
                 if (type.isNotEmpty()) yield(SseEvent(type, json))
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to parse trailing SSE data: ${remaining.take(200)}", e)
+                throw IllegalStateException("Invalid final Codex stream event; response was not completed")
             }
         }
     }
@@ -85,6 +82,13 @@ object CodexSseParser {
             accumulator.onArgumentsDelta(outputIndex, event.json.getString("delta"))
             null
         }
+        "response.function_call_arguments.done" -> {
+            accumulator.onArgumentsDone(
+                event.json.optInt("output_index", 0),
+                event.json.getString("arguments"),
+            )
+            null
+        }
         "response.output_item.done" -> {
             val outputIndex = event.json.optInt("output_index", 0)
             val item = event.json.getJSONObject("item")
@@ -93,12 +97,22 @@ object CodexSseParser {
             } else null
         }
         "response.done", "response.completed" -> {
-            LLMStreamEvent.Completed
+            val response = event.json.optJSONObject("response")
+            when (response?.optString("status")) {
+                "failed" -> LLMStreamEvent.Failed(
+                    response.optJSONObject("error")?.optString("message") ?: "Codex response failed"
+                )
+                "incomplete", "cancelled" -> LLMStreamEvent.Failed("Codex response was not completed")
+                else -> LLMStreamEvent.Completed
+            }
         }
         "response.incomplete" -> {
             val reason = event.json
                 .optJSONObject("response")
-                ?.optString("incomplete_reason", "unknown")
+                ?.let { response ->
+                    response.optJSONObject("incomplete_details")?.optString("reason")
+                        ?: response.optString("incomplete_reason", "unknown")
+                }
                 ?: "unknown"
             LLMStreamEvent.Failed("Response incomplete: $reason")
         }
@@ -111,8 +125,9 @@ object CodexSseParser {
             LLMStreamEvent.Failed(message)
         }
         "error" -> {
-            val message = event.json.optString("message", "")
-                .ifEmpty { event.json.optString("code", "Unknown error") }
+            val error = event.json.optJSONObject("error") ?: event.json
+            val message = error.optString("message", "")
+                .ifEmpty { error.optString("code", "Unknown error") }
             LLMStreamEvent.Failed(message)
         }
         else -> null
@@ -130,6 +145,7 @@ object CodexSseParser {
         )
 
         private val pending = mutableMapOf<Int, PendingCall>()
+        private val emittedCallIds = mutableSetOf<String>()
 
         fun onItemAdded(outputIndex: Int, item: JSONObject) {
             if (item.optString("type") == "function_call") {
@@ -144,13 +160,23 @@ object CodexSseParser {
             pending[outputIndex]?.args?.append(delta)
         }
 
+        fun onArgumentsDone(outputIndex: Int, arguments: String) {
+            pending[outputIndex]?.args?.apply { clear(); append(arguments) }
+        }
+
         fun onItemDone(outputIndex: Int, item: JSONObject): LLMToolCall? {
             if (item.optString("type") != "function_call") return null
             val call = pending.remove(outputIndex)
-            val id = call?.callId ?: item.optString("call_id", "")
-            val fn = call?.name ?: item.optString("name", "")
-            val args = call?.args?.toString()?.ifEmpty { null }
-                ?: item.optString("arguments", "{}")
+            val id = item.optString("call_id").ifBlank { call?.callId.orEmpty() }
+            val fn = item.optString("name").ifBlank { call?.name.orEmpty() }
+            // The completed item's arguments are authoritative, even if deltas
+            // were coalesced or lost. Never execute an incomplete JSON command.
+            val args = item.optString("arguments").ifBlank { call?.args?.toString().orEmpty() }
+            require(id.isNotBlank() && fn.isNotBlank()) { "Codex tool call is missing its id or name" }
+            try { JSONObject(args) } catch (_: Exception) {
+                throw IllegalStateException("Codex tool call has incomplete or invalid arguments")
+            }
+            if (!emittedCallIds.add(id)) return null
             return LLMToolCall(callId = id, name = fn, arguments = args)
         }
     }

@@ -271,9 +271,17 @@ class MemoryStore(
         target.parentFile?.mkdirs()
         val tmpFile = File(target.parentFile, "${target.name}.tmp")
         tmpFile.writeBytes(bytes)
-        if (!tmpFile.renameTo(target)) {
+        try {
+            try {
+                java.nio.file.Files.move(tmpFile.toPath(), target.toPath(),
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                java.nio.file.Files.move(tmpFile.toPath(), target.toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            }
+        } finally {
             tmpFile.delete()
-            throw IOException("Failed to replace ${target.name}")
         }
     }
 }

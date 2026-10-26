@@ -38,11 +38,54 @@ class CodexSseParserTest {
         assertThat(events).isEmpty()
     }
 
-    @Test
-    fun `malformed JSON is silently skipped`() {
+    @Test(expected = IllegalStateException::class)
+    fun `malformed JSON fails instead of silently losing tool arguments`() {
         val sse = "data: {not valid json\n\n"
-        val events = CodexSseParser.parse(sse.byteInputStream()).toList()
-        assertThat(events).isEmpty()
+        CodexSseParser.parse(sse.byteInputStream()).toList()
+    }
+
+    @Test
+    fun `completed arguments override truncated deltas and duplicate calls are suppressed`() {
+        val acc = CodexSseParser.ToolCallAccumulator()
+        val item = JSONObject("""{"type":"function_call","call_id":"c1","name":"click"}""")
+        acc.onItemAdded(0, item)
+        acc.onArgumentsDelta(0, "{\"x\":")
+        item.put("arguments", "{\"x\":100,\"y\":200}")
+        assertThat(acc.onItemDone(0, item)!!.arguments).isEqualTo("{\"x\":100,\"y\":200}")
+        assertThat(acc.onItemDone(0, item)).isNull()
+    }
+
+    @Test
+    fun `arguments done repairs coalesced deltas when item done omits arguments`() {
+        val acc = CodexSseParser.ToolCallAccumulator()
+        val item = JSONObject("""{"type":"function_call","call_id":"c1","name":"swipe"}""")
+        acc.onItemAdded(0, item)
+        acc.onArgumentsDelta(0, "{")
+        CodexSseParser.mapToStreamEvent(sseEvent("response.function_call_arguments.done",
+            JSONObject().put("output_index", 0).put("arguments", "{\"direction\":\"up\"}")), acc)
+        assertThat(acc.onItemDone(0, item)!!.arguments).isEqualTo("{\"direction\":\"up\"}")
+    }
+
+    @Test(expected = IllegalStateException::class)
+    fun `invalid completed tool arguments never become an executable call`() {
+        CodexSseParser.ToolCallAccumulator().onItemDone(0,
+            JSONObject("""{"type":"function_call","call_id":"c1","name":"click","arguments":"{"}"""))
+    }
+
+    @Test
+    fun `nested errors and incomplete final statuses are failures`() {
+        val acc = CodexSseParser.ToolCallAccumulator()
+        val nested = CodexSseParser.mapToStreamEvent(sseEvent("error",
+            JSONObject("""{"error":{"message":"model unavailable"}}""")), acc) as LLMStreamEvent.Failed
+        assertThat(nested.error).isEqualTo("model unavailable")
+        for (status in listOf("failed", "incomplete", "cancelled")) {
+            assertThat(CodexSseParser.mapToStreamEvent(sseEvent("response.completed",
+                JSONObject().put("response", JSONObject().put("status", status))), acc))
+                .isInstanceOf(LLMStreamEvent.Failed::class.java)
+        }
+        val incomplete = CodexSseParser.mapToStreamEvent(sseEvent("response.incomplete",
+            JSONObject("""{"response":{"incomplete_details":{"reason":"max_output_tokens"}}}""")), acc) as LLMStreamEvent.Failed
+        assertThat(incomplete.error).contains("max_output_tokens")
     }
 
     @Test

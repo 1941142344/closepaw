@@ -86,6 +86,9 @@ internal object CodexRequestBuilder {
                 put("type", "function")
                 put("name", tool.name())
                 put("description", tool.description().orElse(""))
+                // Keep optional click/swipe/Termux fields optional. Omitting this
+                // lets Responses normalize the schema into strict mode.
+                put("strict", tool.strict().orElse(false))
                 put("parameters", ToolParameterExtractor.extract(tool) ?: JSONObject())
             })
         }
@@ -129,7 +132,7 @@ internal object CodexRequestBuilder {
                         parts.put(JSONObject().apply {
                             put("type", "input_image")
                             put("image_url", url)
-                            put("detail", "auto")
+                            put("detail", part.asInputImage().detail().toString())
                         })
                     }
                     else -> Log.w(TAG, "Skipping unknown content part: ${part.javaClass.simpleName}")

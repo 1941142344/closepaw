@@ -10,6 +10,45 @@ import org.junit.Test
 
 class OpenAIOAuthTest {
 
+    @Test
+    fun `authorization code remains subscription OAuth without API key exchange`() = kotlinx.coroutines.runBlocking {
+        val requests = mutableListOf<String>()
+        val tokens = OAuthTokens("fake-oauth-access", "fake-refresh", 9000L, null, "fake-id")
+        val result = OAuthTokenExchange.exchange("code+with spaces", "verifier") { body ->
+            requests.add(body)
+            OAuthTokenExchange.Result.Success(tokens)
+        }
+        assertEquals(OAuthTokenExchange.Result.Success(tokens), result)
+        assertEquals(1, requests.size)
+        val form = requests.single().split("&").associate {
+            it.substringBefore("=") to URLDecoder.decode(it.substringAfter("="), "UTF-8")
+        }
+        assertEquals("authorization_code", form["grant_type"])
+        assertEquals("code+with spaces", form["code"])
+        assertEquals("verifier", form["code_verifier"])
+        assertTrue(!form.containsKey("requested_token"))
+    }
+
+    @Test
+    fun `refresh keeps old refresh token when server only returns access token`() = kotlinx.coroutines.runBlocking {
+        val requests = mutableListOf<String>()
+        val result = OAuthTokenExchange.refresh("fake-refresh") { body ->
+            requests.add(body)
+            OAuthTokenExchange.Result.Success(OAuthTokens("new-oauth-access", "", 9000L, null))
+        } as OAuthTokenExchange.Result.Success
+        assertEquals("new-oauth-access", result.tokens.accessToken)
+        assertEquals("fake-refresh", result.tokens.refreshToken)
+        assertEquals(1, requests.size)
+        assertTrue(requests.single().contains("grant_type=refresh_token"))
+    }
+
+    @Test
+    fun `nested profile email is recognized`() {
+        assertEquals("nested@example.com", parseEmailFromJwt(craftJwt(JSONObject().put(
+            "https://api.openai.com/profile", JSONObject().put("email", "nested@example.com")
+        ))))
+    }
+
     private val base64UrlPattern = Regex("^[A-Za-z0-9_-]+$")
 
     @Test

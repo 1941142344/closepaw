@@ -61,6 +61,7 @@ class AgentTraceObservabilityTest {
                         AgentExecutionConfig(
                                 goal = "test",
                                 sessionId = SessionId("session-1"),
+                                modelName = "gpt-5.2",
                                 systemPrompt = "test prompt"
                         )
                 )

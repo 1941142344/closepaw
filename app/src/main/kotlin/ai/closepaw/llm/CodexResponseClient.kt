@@ -28,16 +28,32 @@ import java.util.concurrent.atomic.AtomicReference
  * Uses raw OkHttp + [CodexRequestBuilder] / [CodexSseParser] to stream
  * responses from `chatgpt.com/backend-api/codex/responses`.
  */
-class CodexResponseClient(
-    private val headerSupplier: suspend () -> CodexHeaders
+class CodexResponseClient internal constructor(
+    private val headerSupplier: suspend () -> CodexHeaders,
+    private val httpClient: OkHttpClient,
 ) : LLMClient() {
+
+    constructor(headerSupplier: suspend () -> CodexHeaders) : this(headerSupplier, buildHttpClient())
 
     companion object {
         private const val TAG = "CodexResponseClient"
         private const val CODEX_URL = "https://chatgpt.com/backend-api/codex/responses"
-    }
 
-    private val httpClient: OkHttpClient = buildHttpClient()
+        private fun buildHttpClient(): OkHttpClient =
+            OkHttpClient.Builder()
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(120, TimeUnit.SECONDS)
+                .writeTimeout(30, TimeUnit.SECONDS)
+                // Never forward subscription credentials through redirects.
+                .followRedirects(false)
+                .followSslRedirects(false)
+                .apply {
+                    val sf = InsecureSslConfig.sslSocketFactory
+                    val tm = InsecureSslConfig.trustManager
+                    if (sf != null && tm != null) sslSocketFactory(sf, tm)
+                }
+                .build()
+    }
 
     // ── Non-streaming ────────────────────────────────────────────────────
 
@@ -68,47 +84,13 @@ class CodexResponseClient(
                 val accumulator = CodexSseParser.ToolCallAccumulator()
 
                 for (event in CodexSseParser.parse(stream)) {
-                    val outputIndex = event.json.optInt("output_index", 0)
-                    when (event.type) {
-                        "response.created" -> {
-                            responseId = event.json.optJSONObject("response")
-                                ?.optString("id", "unknown") ?: "unknown"
-                        }
-                        "response.output_text.delta" -> {
-                            textContent.append(event.json.optString("delta", ""))
-                        }
-                        "response.output_item.added" -> {
-                            val item = event.json.optJSONObject("item")
-                            if (item != null) accumulator.onItemAdded(outputIndex, item)
-                        }
-                        "response.function_call_arguments.delta" -> {
-                            accumulator.onArgumentsDelta(outputIndex, event.json.optString("delta", ""))
-                        }
-                        "response.output_item.done" -> {
-                            val item = event.json.optJSONObject("item")
-                            if (item?.optString("type") == "function_call") {
-                                accumulator.onItemDone(outputIndex, item)?.let { toolCalls.add(it) }
-                            }
-                        }
-                        "response.done", "response.completed" -> {
-                            sawCompletion = true
-                        }
-                        "response.incomplete" -> {
-                            val reason = event.json.optJSONObject("response")
-                                ?.optString("incomplete_reason", "unknown") ?: "unknown"
-                            throw RuntimeException("Codex response incomplete: $reason")
-                        }
-                        "response.failed" -> {
-                            val msg = event.json.optJSONObject("response")
-                                ?.optJSONObject("error")
-                                ?.optString("message", "Unknown error") ?: "Unknown error"
-                            throw RuntimeException("Codex response failed: $msg")
-                        }
-                        "error" -> {
-                            val msg = event.json.optString("message", "")
-                                .ifEmpty { event.json.optString("code", "Unknown error") }
-                            throw RuntimeException("Codex error: $msg")
-                        }
+                    when (val mapped = CodexSseParser.mapToStreamEvent(event, accumulator)) {
+                        is LLMStreamEvent.Created -> responseId = mapped.responseId
+                        is LLMStreamEvent.TextDelta -> textContent.append(mapped.delta)
+                        is LLMStreamEvent.ToolCallDone -> toolCalls.add(mapped.toolCall)
+                        is LLMStreamEvent.Completed -> { sawCompletion = true; break }
+                        is LLMStreamEvent.Failed -> throw IllegalStateException(mapped.error)
+                        null -> Unit
                     }
                 }
 
@@ -187,6 +169,7 @@ class CodexResponseClient(
                                         }
                                     }
                                     emitter.emit(streamEvent)
+                                    if (streamEvent is LLMStreamEvent.Completed) break
                                 }
                             }
 
@@ -239,20 +222,6 @@ class CodexResponseClient(
         return builder.build()
     }
 
-    private fun buildHttpClient(): OkHttpClient =
-        OkHttpClient.Builder()
-            .connectTimeout(30, TimeUnit.SECONDS)
-            .readTimeout(120, TimeUnit.SECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
-            .apply {
-                val sf = InsecureSslConfig.sslSocketFactory
-                val tm = InsecureSslConfig.trustManager
-                if (sf != null && tm != null) {
-                    sslSocketFactory(sf, tm)
-                }
-            }
-            .build()
-
     private fun handleErrorResponse(response: okhttp3.Response): Nothing {
         val body = response.body.string()
         val status = response.code
@@ -276,8 +245,10 @@ class CodexResponseClient(
                 }
                 throw RateLimitException(friendly)
             }
-            status == 401 || status == 403 ->
-                throw IllegalStateException("Token rejected: $message")
+            status == 401 ->
+                throw IllegalStateException("Token rejected. Please sign in with ChatGPT again.")
+            status == 403 || code in setOf("model_not_found", "model_not_supported", "unsupported_model") ->
+                throw IllegalStateException("This Codex model is unavailable for this ChatGPT account. Choose another current Codex model in Settings or check your workspace model access.")
             status in 500..599 ->
                 throw TransientException("Server error: HTTP $status", null)
             else ->

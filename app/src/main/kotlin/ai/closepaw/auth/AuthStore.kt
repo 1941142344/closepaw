@@ -120,7 +120,13 @@ class AuthStore(
                 return@withLock latest.toHeaders()
             }
             val refreshed = try {
-                refresher(latest.refreshToken)
+                refresher(latest.refreshToken).let { fresh ->
+                    fresh.copy(
+                        refreshToken = fresh.refreshToken.ifBlank { latest.refreshToken },
+                        idToken = fresh.idToken ?: latest.idToken,
+                        email = fresh.email ?: latest.email,
+                    )
+                }
             } catch (t: Throwable) {
                 throw OAuthRefreshFailed(provider, t)
             }
@@ -141,11 +147,13 @@ class AuthStore(
     }
 
     private fun isExpiringSoon(cred: AuthCredential.OAuth): Boolean =
-        cred.expiresAt - nowMs() < REFRESH_BUFFER_MS
+        // Older ClosePaw versions incorrectly stored an exchanged API key here.
+        cred.accessToken.startsWith("sk-") || cred.expiresAt - nowMs() < REFRESH_BUFFER_MS
 
     private fun AuthCredential.OAuth.toHeaders(): CodexHeaders = CodexHeaders(
         accessToken = accessToken,
-        chatgptAccountId = idToken?.let(::parseChatgptAccountId),
+        chatgptAccountId = OAuthCodexValidator.extractAccountId(accessToken)
+            ?: idToken?.let(::parseChatgptAccountId),
         email = email,
     )
 
@@ -158,7 +166,8 @@ class AuthStore(
         return try {
             json.decodeFromString<StoredCredential>(raw).toDomain()
         } catch (e: Exception) {
-            Log.w(TAG, "Failed to parse $key: ${e.message}")
+            // Serialization errors may include the credential JSON in their message.
+            Log.w(TAG, "Failed to parse stored credential for $key")
             null
         }
     }

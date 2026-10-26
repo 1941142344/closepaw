@@ -44,7 +44,8 @@ class AgentSkillCatalogTest {
         val catalog = AgentSkillCatalog(tempDir.root)
         val entry = catalog.entries["my-skill"]!!
 
-        assertThat(entry.filePath).endsWith("my-skill/SKILL.md")
+        assertThat(java.io.File(entry.filePath).parentFile.name).isEqualTo("my-skill")
+        assertThat(java.io.File(entry.filePath).name).isEqualTo("SKILL.md")
         assertThat(java.io.File(entry.filePath).isFile).isTrue()
     }
 
