@@ -1,0 +1,36 @@
+name: Verify community preview
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Android build dependencies
+        run: sdkmanager 'platforms;android-36' 'build-tools;35.0.0'
+      - name: Test, lint and build
+        run: bash ./gradlew --no-configuration-cache --console=plain :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+      - name: APK checksum
+        run: sha256sum app/build/outputs/apk/debug/app-debug.apk > SHA256SUMS-ci.txt
+      - name: Upload build and reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: community-preview-debug-and-reports
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app/build/reports/tests/testDebugUnitTest/
+            app/build/reports/lint-results-debug.html
+            SHA256SUMS-ci.txt
+          retention-days: 14

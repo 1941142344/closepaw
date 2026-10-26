@@ -7,6 +7,9 @@ permissions:
   contents: write
 jobs:
   release:
+    # Community forks publish their independently verified preview artifacts.
+    # Do not invoke upstream signing-secret requirements from fork tags.
+    if: github.repository == 'imoonkey/closepaw'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

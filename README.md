@@ -1,3 +1,11 @@
+> **社区兼容修复预览版 / Community compatibility preview**
+>
+> 本仓库基于 [imoonkey/closepaw](https://github.com/imoonkey/closepaw)，由社区维护 ChatGPT/Codex OAuth、模型迁移和工具调用兼容修复。不是上游或 OpenAI 官方发行版。
+>
+> **[中文介绍与安装](README.zh-CN.md) · [本分支预览版下载](https://github.com/1941142344/closepaw/releases/tag/v0.1.0-codex-compat.1) · [修复说明](doc/dev/chatgpt-plus-compatibility.md) · [B 站演示与口播](doc/release/community/bilibili-demo.md)**
+>
+> 已完成 Gradle 构建与离线回归；真实 Plus 登录、账号模型权限和手机完整演示仍待验证。当前已知 `unsupported_country_region_territory` 为官方授权页返回的地区限制。登录路线不需要 OpenAI API Key；模型可用性与订阅限额由服务端决定。附带 APK 使用 Debug 签名。
+
 <h1 align="center">
   <img src="doc/release/play-store/app-icon-512.png" width="72" alt="ClosePaw" /><br/>
   ClosePaw
